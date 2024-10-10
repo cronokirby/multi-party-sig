@@ -70,6 +70,31 @@ func (f *fieldElement) accumulate(a *[params.OTBytes]byte, b *[params.OTBytes]by
 	}
 }
 
+func (f *fieldElement) reduce() [params.OTBytes]byte {
+	if params.OTBytes == 16 {
+		// The irreducible polynomial is z^128 + z^7 + z^2 + z + 1
+		// c.f. Guide to Elliptic Curve Cryptography, Hankerson, Menezes, Vanstone, section A.1
+		lo := [2]uint64{f[0], f[1]}
+		hi := [2]uint64{f[2], f[3]}
+		for i := 0; i < 2; i++ {
+			lo[i] ^= (hi[i] << 7) ^ (hi[i] << 2) ^ (hi[i] << 1) ^ hi[i]
+			if i > 0 {
+				lo[i] ^=
+					(hi[i-1] >> (64 - 7)) ^ (hi[i-1] >> (64 - 2)) ^ (hi[i-1] >> (64 - 1))
+			}
+		}
+		// The top value has at most 7 set bits, so we can safely include it as usual
+		top := (hi[1] >> (64 - 7)) ^ (hi[1] >> (64 - 2)) ^ (hi[1] >> (64 - 1))
+		lo[0] ^= (top << 7) ^ (top << 2) ^ (top << 1) ^ top
+		var out [params.OTBytes]byte
+		binary.LittleEndian.PutUint64(out[:8], lo[0])
+		binary.LittleEndian.PutUint64(out[8:], lo[1])
+		return out
+	} else {
+		panic(fmt.Sprintf("unsupported params.OTBytes: %d", params.OTBytes))
+	}
+}
+
 // ExtendedOTSendResult is the Sender's result for an Extended OT.
 //
 // The Sender receives two batches of random vectors, and the Receiver receives a batch
@@ -109,12 +134,7 @@ func ExtendedOTSend(ctxHash *hash.Hash, setup *CorreOTSendSetup, batchSize int, 
 		q.accumulate(&correResult._Q[i], &chi[i])
 	}
 
-        // XXX: convert from field element to bytes
-        // not reduced, so mul wont give the correct result
-	var tmp [params.OTBytes]byte
-        for j := 0; j < params.OTBytes; j++ {
-            tmp[j] ^= byte(msg.X[j/8] >> (8*(j%8)))
-        }
+  tmp := msg.X.reduce()
 
 	q.accumulate(&tmp, &setup._Delta)
 
@@ -157,8 +177,8 @@ type ExtendedOTReceiveResult struct {
 type ExtendedOTReceiveMessage struct {
 	CorreMsg *CorreOTReceiveMessage
 	//X        [params.OTBytes]byte
-	X        fieldElement
-	T        fieldElement
+	X fieldElement
+	T fieldElement
 }
 
 // ExtendedOTReceive runs the Receiver's side of the Extended OT Protocol.
@@ -191,19 +211,19 @@ func ExtendedOTReceive(ctxHash *hash.Hash, setup *CorreOTReceiveSetup, choices [
 	for i := 0; i < len(chi); i++ {
 		mask := -bitAt(i, extraChoices)
 
-	        var maskArg [params.OTBytes]byte
-                for l := range maskArg {
-                    maskArg[l] = mask
-                }
+		var maskArg [params.OTBytes]byte
+		for l := range maskArg {
+			maskArg[l] = mask
+		}
 
 		outMsg.X.accumulate(&maskArg, &chi[i])
 
-                /*
-                // original, incorrect (AND instead of GF mul)
-                for j := 0; j < params.OTBytes; j++ {
-			outMsg.X[j] ^= mask & chi[i][j]
-		}
-                */
+		/*
+			                // original, incorrect (AND instead of GF mul)
+			                for j := 0; j < params.OTBytes; j++ {
+						outMsg.X[j] ^= mask & chi[i][j]
+					}
+		*/
 	}
 
 	for i := 0; i < len(chi) && i < len(correResult._T); i++ {
